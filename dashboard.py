@@ -20,7 +20,7 @@ CHART_HEIGHT = 650  # Unified height for perfect alignment
 
 @st.cache_data
 def load_data():
-    """Load and clean the Facebook ads data."""
+    """Load and clean the Facebook ads data with link fallback logic."""
     if not os.path.exists(REPORT_FILE):
         return None
     
@@ -41,6 +41,22 @@ def load_data():
     for col in PERCENTAGE_COLUMNS:
         if col in df.columns and df[col].max() <= 1.0:
             df[col] = df[col] * 100
+            
+    # --- NEW: FALLBACK LINK LOGIC ---
+    # 1. Create a mapping of Ad Set Name to the first valid video link found in that set
+    valid_links = df[df['Facebook Video Link'].str.contains('http', na=False, case=False)]
+    ad_set_link_map = valid_links.groupby('Ad set name')['Facebook Video Link'].first().to_dict()
+    
+    # 2. Function to fill missing links using the map
+    def fill_missing_link(row):
+        current_link = str(row['Facebook Video Link'])
+        if 'http' not in current_link.lower():
+            # Attempt to get link from the same ad set
+            return ad_set_link_map.get(row['Ad set name'], row['Facebook Video Link'])
+        return row['Facebook Video Link']
+
+    df['Facebook Video Link'] = df.apply(fill_missing_link, axis=1)
+    # --------------------------------
     
     # Calculate CPA if not present
     if 'Calculated_CPA' not in df.columns:
@@ -64,6 +80,7 @@ def load_data():
     df = df[(df['Conversions'] > 0) | (df['Normalized_Spend_USD'] > 0)]
     
     return df.reset_index(drop=True)
+
 
 def display_kpi_metrics(df):
     """Display high-level account KPI metrics."""
