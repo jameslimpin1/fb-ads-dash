@@ -336,5 +336,10 @@ def main():
         hide_index=True, use_container_width=True
     )
 
+    #Footer Count 
+    current_rows = len(leaderboard)
+    total_filtered = len(agg_df)
+    st.markdown(f"📊 **Showing {current_rows} of {total_filtered} ads** matching your filters.")
+
 if __name__ == "__main__":
     main()
