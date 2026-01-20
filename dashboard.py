@@ -339,7 +339,8 @@ def main():
     #Footer Count 
     current_rows = len(leaderboard)
     total_filtered = len(agg_df)
-    st.markdown(f"📊 **Showing {current_rows} of {total_filtered} ads** matching your filters.")
+    st.markdown(f"📊 **Showing {current_rows} ads** matching your filters.")
+    # check why {total_filtered} is not equal to 418 ads, hmmm
 
 if __name__ == "__main__":
     main()
