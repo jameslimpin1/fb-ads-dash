@@ -73,8 +73,13 @@ def display_kpi_metrics(df):
     t_visits = df['Visits'].sum()
     t_u_visits = df['Unique visits'].sum()
     
-    active_cpas = df[df['CPA'] > 0]['CPA']
-    avg_cpa = active_cpas.mean() if not active_cpas.empty else 0
+    #Compute the Weighted Average CPA
+    total_payout = (df['CPA'] * df['Conversions']).sum()
+    t_convs = df['Conversions'].sum()
+    avg_cpa = total_payout / t_convs if t_convs > 0 else 0
+
+
+
     u_pct = (t_u_visits / t_visits * 100) if t_visits > 0 else 0
     
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -166,7 +171,8 @@ def main():
         h = 700 if "Focus" in view_option else 400
         
         fig_trend = px.line(trend_agg, x="Date", y="Conversions", color="Ad name", markers=True, template="plotly_dark", height=h)
-        st.plotly_chart(fig_trend, use_container_width=True)
+        #st.plotly_chart(fig_trend, use_container_width=True)
+        st.plotly_chart(fig_trend, width="stretch")
 
     # --- BREAKDOWN TABLES ---
     if view_option in ["Standard Dashboard", "Focus: Trends"]:
@@ -193,7 +199,8 @@ def main():
                 
                 st.dataframe(
                     pivot_mo.style.background_gradient(cmap='YlGn', subset=mo_cols, axis=1),
-                    use_container_width=True,
+                    #use_container_width=True,
+                    width="stretch",
                     column_config={
                         "Ad name": st.column_config.TextColumn("Ad Name", width="small"), # SHOW ACTUAL NAME
                         "Facebook Video Link": st.column_config.LinkColumn("Watch", display_text="📺 View"), # SHOW LINK BUTTON
@@ -231,7 +238,8 @@ def main():
                 # Streamlit will pin all index levels to the left
                 st.dataframe(
                     pivot_da,
-                    use_container_width=True,
+                    #use_container_width=True,
+                    width="stretch",
                     column_config={
                         "Ad name": st.column_config.TextColumn("Ad Name", width="small"),
                         "Facebook Video Link": st.column_config.LinkColumn("Watch", display_text="📺 View"),
@@ -246,13 +254,36 @@ def main():
         st.divider()
 
     # --- STANDARD DATA AGGREGATION ---
+    #agg_df = df.groupby(['Ad ID', 'Ad name', 'Clickable_Label', 'Facebook Video Link']).agg({
+    #    'Conversions': 'sum', 
+    #    'Visits': 'sum', 
+    #    'Unique visits': 'sum', 
+    #    'Normalized_Spend_USD': 'max', 
+    #    'CPA': lambda x: x[x > 0].mean() 
+    #}).reset_index().fillna(0) 
+
+    # --- STEP 1: Calculate temporary Revenue column ---
+    # This is Payout per Conv * Number of Convs
+    df['Total_Payout'] = df['CPA'] * df['Conversions']
+
+    # --- STEP 2: Group and Aggregate ---
     agg_df = df.groupby(['Ad ID', 'Ad name', 'Clickable_Label', 'Facebook Video Link']).agg({
         'Conversions': 'sum', 
         'Visits': 'sum', 
         'Unique visits': 'sum', 
         'Normalized_Spend_USD': 'max', 
-        'CPA': lambda x: x[x > 0].mean() 
-    }).reset_index().fillna(0)
+        'Total_Payout': 'sum'  # Sum up all the revenue
+    }).reset_index()
+
+    # --- STEP 3: Final Weighted CPA Calculation ---
+    # Weighted CPA = Total Payout / Total Conversions
+    agg_df['CPA'] = agg_df['Total_Payout'] / agg_df['Conversions']
+
+    # Handle cases with 0 conversions to avoid "Infinity" or "NaN"
+    agg_df['CPA'] = agg_df['CPA'].fillna(0).replace([np.inf, -np.inf], 0)
+
+
+    # --- FUNNEL & PERFORMANCE CHARTS ---
 
     if view_option in ["Standard Dashboard", "Focus: Funnel"]:
         col_a, col_b = st.columns(2) if view_option == "Standard Dashboard" else (st.container(), st.container())
@@ -266,7 +297,8 @@ def main():
             fig_f.add_trace(go.Bar(y=top_funnel['Clickable_Label'], x=top_funnel['Conversions'], name='Convs', orientation='h', marker_color='#EF553B'))
             h = 800 if "Focus" in view_option else CHART_HEIGHT
             fig_f.update_layout(barmode='overlay', template="plotly_dark", height=h, margin=dict(l=20, r=20, t=30, b=20))
-            st.plotly_chart(fig_f, use_container_width=True)
+            #st.plotly_chart(fig_f, use_container_width=True)
+            st.plotly_chart(fig_f, width="stretch")
 
     if view_option in ["Standard Dashboard", "Focus: Performance Chart"]:
         if view_option == "Standard Dashboard":
@@ -282,7 +314,8 @@ def main():
             fig_p.add_trace(go.Scatter(y=top_perf['Clickable_Label'], x=top_perf['CPA'], name='CPA ($)', mode='markers+lines', marker=dict(size=10, color='#FFA15A'), xaxis='x2'))
             h = 800 if "Focus" in view_option else CHART_HEIGHT
             fig_p.update_layout(template="plotly_dark", height=h, xaxis=dict(title="Conversions"), xaxis2=dict(title="CPA ($)", overlaying='x', side='top', showgrid=False), margin=dict(l=20, r=20, t=50, b=20))
-            st.plotly_chart(fig_p, use_container_width=True)
+            #st.plotly_chart(fig_p, use_container_width=True)
+            st.plotly_chart(fig_p, width="stretch")
 
     if view_option == "Standard Dashboard":
         st.divider()
@@ -303,7 +336,9 @@ def main():
             "CPA": st.column_config.NumberColumn("CPA ($)", format="$%.2f"),
             "Facebook Video Link": st.column_config.LinkColumn("Watch", display_text="📺 View Ad")
         },
-        hide_index=True, use_container_width=True
+        hide_index=True, 
+        #use_container_width=True
+        width="stretch"
     )
     st.markdown(f"📊 **Showing {len(leaderboard)} of {len(agg_df)} ads** matching your filters.")
 
