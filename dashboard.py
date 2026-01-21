@@ -22,10 +22,17 @@ CHART_HEIGHT = 600
 def load_data():
     if not os.path.exists(REPORT_FILE):
         return None
-    df = pd.read_csv(REPORT_FILE, dtype={'Ad ID': str})
-    df = df.dropna(subset=['Ad ID'])
     
-    # 1. Date Sanitization
+    # 1. Load Data (Force Ad ID to string to keep "1202..." intact)
+    df = pd.read_csv(REPORT_FILE, dtype={'Ad ID': str})
+    
+    # 2. Filter Garbage (Remove template tags or empty IDs)
+    df = df.dropna(subset=['Ad ID'])
+    df = df[~df['Ad ID'].astype(str).str.contains('{', na=False)]
+    df = df[df['Ad ID'] != 'nan']
+
+    # 3. Date Sanitization
+    # We prefer 'Day' as this is a Daily Report
     if 'Day' in df.columns:
         df['Date'] = pd.to_datetime(df['Day'], errors='coerce')
     else:
@@ -34,58 +41,52 @@ def load_data():
     df['Month Date'] = pd.to_datetime(df['Month Date'], errors='coerce')
     df = df.dropna(subset=['Date']) 
     
-    # 2. ID Sanitization
-    df['Ad ID'] = df['Ad ID'].astype(str).str.strip().str.replace('.0', '', regex=False)
-    
-    # 3. Numeric Conversion
+    # 4. Numeric Conversion & Cleanup
     for col in NUMERIC_COLUMNS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-            
-    # 4. Percentage Scaling
-    if df['Unique Visit %'].max() <= 1.0:
+    
+    # FIX: Convert float-like integers (60.0 -> 60) for cleaner display
+    if 'Conversions' in df.columns:
+        df['Conversions'] = df['Conversions'].astype(int)
+    if 'Visits' in df.columns:
+        df['Visits'] = df['Visits'].astype(int)
+    if 'Unique visits' in df.columns:
+        df['Unique visits'] = df['Unique visits'].astype(int)
+
+    # 5. Percentage Scaling (Handle 0.90 vs 90.0)
+    if df['Unique Visit %'].max() <= 1.1:
         df['Unique Visit %'] = df['Unique Visit %'] * 100
     
-    # 5. Link Healing (Optimized: Vectorized + Check)
-    # If the report.py ran correctly, this is just a fallback.
-    if 'Ad set name' in df.columns and 'Facebook Video Link' in df.columns:
-        # Simple fill for 'No Link' if possible, using vectorization logic where feasible or map
-        # Creating a map of known links
-        mask_valid = df['Facebook Video Link'].str.contains('http', na=False, case=False)
-        if mask_valid.any():
-            ad_set_map = df[mask_valid].set_index('Ad set name')['Facebook Video Link'].to_dict()
-            # Apply map only to missing rows
-            mask_missing = ~mask_valid
-            df.loc[mask_missing, 'Facebook Video Link'] = df.loc[mask_missing, 'Ad set name'].map(ad_set_map).fillna("No Link")
-
-    # 6. Clickable Axis Labels (for Charts)
+    # 6. String Safety (Prevent TypeError)
+    df['Facebook Video Link'] = df['Facebook Video Link'].fillna("").astype(str)
+    df['Ad name'] = df['Ad name'].fillna(df['Ad ID']).astype(str)
+    
+    # 7. Clickable Labels for Charts
     df['Clickable_Label'] = np.where(
         df['Facebook Video Link'].str.contains('http', na=False),
-        '<a href="' + df['Facebook Video Link'] + '" target="_blank" style="color: #00CC96; text-decoration: none;">' + df['Ad name'].fillna(df['Ad ID']) + '</a>',
-        df['Ad name'].fillna(df['Ad ID'])
+        '<a href="' + df['Facebook Video Link'] + '" target="_blank" style="color: #00CC96; text-decoration: none;">' + df['Ad name'] + '</a>',
+        df['Ad name']
     )
     return df
 
 def display_kpi_metrics(df):
-    # Spending is Lifetime per Ad ID, so we deduplicate to avoid summing the same ad's spend 30 times for 30 days
-    t_spend = df.drop_duplicates(subset=['Ad ID'])['Normalized_Spend_USD'].sum()
+    # --- KPI AGGREGATION ---
+    t_spend = df['Normalized_Spend_USD'].sum()
     t_convs = df['Conversions'].sum()
     t_visits = df['Visits'].sum()
     t_u_visits = df['Unique visits'].sum()
     
-    #Compute the Weighted Average CPA
+    # Weighted CPA Calculation
     total_payout = (df['CPA'] * df['Conversions']).sum()
-    t_convs = df['Conversions'].sum()
     avg_cpa = total_payout / t_convs if t_convs > 0 else 0
-
-
 
     u_pct = (t_u_visits / t_visits * 100) if t_visits > 0 else 0
     
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Spend (Lifetime)", f"${t_spend:,.0f}", help="Sum of lifetime spend for ads active in selection")
+    c1.metric("Total Spend", f"${t_spend:,.0f}", help="Sum of daily spend")
     c2.metric("Conversions", f"{t_convs:,.0f}")
-    c3.metric("Avg CPA", f"${avg_cpa:.2f}")
+    c3.metric("Weighted Avg CPA", f"${avg_cpa:.2f}")
     c4.metric("Unique Visits", f"{t_u_visits:,.0f}")
     c5.metric("Unique %", f"{u_pct:.1f}%")
 
@@ -95,252 +96,201 @@ def main():
         st.error("❌ Data file not found. Please run the report generator.")
         return
     
-    # --- 1. SIDEBAR CONTROLS ---
+    # --- 1. SIDEBAR ---
     st.sidebar.header("🕹️ Control Panel")
     view_option = st.sidebar.radio(
-        "🔎 Dashboard View",
+        "🔎 View",
         options=["Standard Dashboard", "Focus: Trends", "Focus: Funnel", "Focus: Performance Chart"],
         index=0
     )
-    
     st.sidebar.divider()
 
     # --- 2. DATE FILTERS ---
-    st.sidebar.write("📅 **Select Custom Date Range**")
+    st.sidebar.write("📅 **Select Date Range**")
+    min_d, max_d = raw_df['Date'].min().date(), raw_df['Date'].max().date()
+    default_s, default_e = date(2025, 1, 1), date(2025, 12, 31)
 
-    # Fetch data boundaries from the loaded dataframe
-    min_data_date = raw_df['Date'].min().date()
-    max_data_date = raw_df['Date'].max().date()
+    with st.sidebar.form("date_filter"):
+        date_range = st.date_input("Range", (default_s, default_e), min_value=min_d, max_value=max_d)
+        submit = st.form_submit_button("Apply")
 
-    # Define the initial default range
-    default_start = date(2025, 1, 1)
-    default_end = date(2025, 12, 31)
+    if 'dates' not in st.session_state:
+        st.session_state.dates = (default_s, default_e)
+    if submit and len(date_range) == 2:
+        st.session_state.dates = date_range
 
-    # Use a form to batch the input and prevent reruns while typing
-    with st.sidebar.form("date_filter_form"):
-        date_range = st.date_input(
-            "Date Range",
-            value=(default_start, default_end),
-            min_value=min_data_date,
-            max_value=max_data_date,
-            format="YYYY/MM/DD" 
-        )
-        
-        # This button acts as the 'Enter' key for your typed dates
-        submit_date = st.form_submit_button("Apply Date Range")
+    start_date, end_date = st.session_state.dates
+    df = raw_df[(raw_df['Date'].dt.date >= start_date) & (raw_df['Date'].dt.date <= end_date)]
 
-    # Persistent state management
-    if 'final_date_range' not in st.session_state:
-        st.session_state.final_date_range = (default_start, default_end)
-
-    if submit_date:
-        # Check if the user selected a full range (start and end)
-        if isinstance(date_range, tuple) and len(date_range) == 2:
-            st.session_state.final_date_range = date_range
-
-    # Use df_dates for your filtering logic below
-    df_dates = st.session_state.final_date_range
-
-
-    # --- 3. GLOBAL FILTERS ---
+    # Search Filter
     search_q = st.sidebar.text_input("🔍 Search Ad Name/ID:")
-    row_count = st.sidebar.number_input("🔢 Leaderboard Rows:", min_value=1, value=20)
-
-    # Apply Filters
-    if len(date_range) == 2:
-        start_date, end_date = date_range
-        df = raw_df[(raw_df['Date'].dt.date >= start_date) & (raw_df['Date'].dt.date <= end_date)]
-    else:
-        df = raw_df
-
     if search_q:
         df = df[df['Ad name'].str.contains(search_q, case=False) | df['Ad ID'].str.contains(search_q, case=False)]
 
-    # --- HEADER & KPI ---
+    # --- DYNAMIC ROW COUNTS ---
+    # Calculate how many unique ads matched the filters
+    total_ads_matched = df['Ad ID'].nunique()
+    
+    # Ensure limits are safe (at least 1)
+    max_limit = max(1, total_ads_matched)
+    # Default value shouldn't exceed the max available
+    default_val = min(20, max_limit)
+
+    row_count_td = st.sidebar.number_input(
+        "🔢 Monthly/Daily Breakdown Rows:", 
+        min_value=1, 
+        max_value=max_limit, 
+        value=default_val,
+        help=f"Max available: {max_limit}"
+    )
+    
+    row_count_lb = st.sidebar.number_input(
+        "🔢 Master Leaderboard Rows:", 
+        min_value=1, 
+        max_value=max_limit, 
+        value=default_val,
+        help=f"Max available: {max_limit}"
+    )
+
+    # --- 3. MAIN DASHBOARD ---
     st.title("🚀 2025 FB Ads Performance")
     display_kpi_metrics(df)
     st.divider()
 
-    # --- TREND CHART ---
+    # --- TRENDS ---
     if view_option in ["Standard Dashboard", "Focus: Trends"]:
         st.subheader("📈 Conversion Trend")
-        top_14_ids = raw_df.groupby('Ad ID')['Conversions'].sum().nlargest(14).index
+        top_ids = df.groupby('Ad ID')['Conversions'].sum().nlargest(15).index
+        trend_df = df[df['Ad ID'].isin(top_ids)].groupby(['Date', 'Ad name'])['Conversions'].sum().reset_index()
         
-        # Optimize Trend Chart
-        trend_agg = df[df['Ad ID'].isin(top_14_ids)].groupby(['Date', 'Ad name'])['Conversions'].sum().reset_index()
         h = 700 if "Focus" in view_option else 400
-        
-        fig_trend = px.line(trend_agg, x="Date", y="Conversions", color="Ad name", markers=True, template="plotly_dark", height=h)
-        #st.plotly_chart(fig_trend, use_container_width=True)
-        st.plotly_chart(fig_trend, width="stretch")
+        fig = px.line(trend_df, x="Date", y="Conversions", color="Ad name", markers=True, template="plotly_dark", height=h)
+        st.plotly_chart(fig, width="stretch")
 
     # --- BREAKDOWN TABLES ---
     if view_option in ["Standard Dashboard", "Focus: Trends"]:
-        tab_month, tab_day = st.tabs(["📅 Monthly Breakdown", "🗓️ Daily Breakdown"])
+        tab_mo, tab_da = st.tabs(["📅 Monthly Breakdown", "🗓️ Daily Breakdown"])
         
-        # TAB 1: Monthly
-        with tab_month:
+        # Calculate total unique ads in the current filter context
+        total_ads_in_view = df['Ad ID'].nunique()
+        
+        # Monthly Pivot
+        with tab_mo:
             if not df.empty:
-                pivot_mo = df.pivot_table(
-                    index=['Ad ID', 'Ad name', 'Facebook Video Link'], 
-                    columns='Month Date', 
-                    values='Conversions', 
-                    aggfunc='sum',
-                    fill_value=0
-                )
-                pivot_mo.columns = [c.strftime('%b %Y') for c in pivot_mo.columns]
-                mo_cols = list(pivot_mo.columns)
-                pivot_mo['Total Conv'] = pivot_mo.sum(axis=1)
-                pivot_mo = pivot_mo.sort_values(by='Total Conv', ascending=False).reset_index()
-
-                #column ordering
-                new_order = ['Ad ID', 'Ad name', 'Facebook Video Link', 'Total Conv'] + mo_cols
-                pivot_mo = pivot_mo[new_order]
+                p_mo = df.pivot_table(index=['Ad ID', 'Ad name', 'Facebook Video Link'], columns='Month Date', values='Conversions', aggfunc='sum', fill_value=0)
+                p_mo.columns = [c.strftime('%b') for c in p_mo.columns]
+                p_mo['Total'] = p_mo.sum(axis=1)
+                
+                # Sort and Limit by row_count_td
+                p_mo = p_mo.sort_values('Total', ascending=False).head(int(row_count_td)).reset_index()
+                
+                # Reorder columns
+                cols = ['Ad ID', 'Ad name', 'Facebook Video Link', 'Total'] + [c for c in p_mo.columns if c not in ['Ad ID', 'Ad name', 'Facebook Video Link', 'Total']]
                 
                 st.dataframe(
-                    pivot_mo.style.background_gradient(cmap='YlGn', subset=mo_cols, axis=1),
-                    #use_container_width=True,
+                    p_mo[cols].style.background_gradient(cmap='YlGn', subset=cols[4:], axis=1),
                     width="stretch",
                     column_config={
-                        "Ad name": st.column_config.TextColumn("Ad Name", width="small"), # SHOW ACTUAL NAME
-                        "Facebook Video Link": st.column_config.LinkColumn("Watch", display_text="📺 View"), # SHOW LINK BUTTON
-                        "Total Conv": st.column_config.NumberColumn("Total Conv", format="%d")
+                        "Facebook Video Link": st.column_config.LinkColumn("Link", display_text="View"),
+                        "Total": st.column_config.NumberColumn("Total", format="%d")
                     },
                     hide_index=True
                 )
+                # Markdown Annotation for Monthly
+                st.markdown(f"**Showing top {len(p_mo)} of {total_ads_in_view} ads.**")
 
-        # TAB 2: Daily (Clean Table, No Heatmap)
-        with tab_day:
+        # Daily Pivot
+        with tab_da:
             if not df.empty:
-                # 1. Create the pivot table
-                pivot_da = df.pivot_table(
-                    index=['Ad ID', 'Ad name', 'Facebook Video Link'], 
-                    columns='Date', 
-                    values='Conversions', 
-                    aggfunc='sum',
-                    fill_value=0
-                )
+                p_da = df.pivot_table(index=['Ad ID', 'Ad name', 'Facebook Video Link'], columns='Date', values='Conversions', aggfunc='sum', fill_value=0)
+                p_da.columns = [c.strftime('%m/%d') for c in p_da.columns]
+                p_da['Total'] = p_da.sum(axis=1)
                 
-                # 2. Format date columns
-                pivot_da.columns = [c.strftime('%m/%d') for c in pivot_da.columns]
-                da_cols = list(pivot_da.columns)
+                # Sort and Limit by row_count_td
+                p_da = p_da.sort_values('Total', ascending=False).head(int(row_count_td))
                 
-                # 3. Calculate Total and sort
-                pivot_da['Total Conv'] = pivot_da.sum(axis=1)
-                pivot_da = pivot_da.sort_values(by='Total Conv', ascending=False)
-
-                # 4. REARRANGE: Move 'Total Conv' into the index so it also freezes
-                # Currently, index has: Ad ID, Ad name, Facebook Video Link
-                # We add Total Conv to it.
-                pivot_da.set_index('Total Conv', append=True, inplace=True)
-
-                # 5. Display the dataframe
-                # Streamlit will pin all index levels to the left
+                # Freeze Total Column
+                p_da.set_index('Total', append=True, inplace=True)
+                
                 st.dataframe(
-                    pivot_da,
-                    #use_container_width=True,
+                    p_da,
                     width="stretch",
-                    column_config={
-                        "Ad name": st.column_config.TextColumn("Ad Name", width="small"),
-                        "Facebook Video Link": st.column_config.LinkColumn("Watch", display_text="📺 View"),
-                        "Total Conv": st.column_config.NumberColumn("Total Conv", format="%d")
-                    }
-                    # Note: hide_index=True would unfreeze them, so we keep it False or omit it.
+                    column_config={"Facebook Video Link": st.column_config.LinkColumn("Link", display_text="View")}
                 )
+                # Markdown Annotation for Daily
+                st.markdown(f"**Showing top {len(p_da)} of {total_ads_in_view} ads.**")
 
-                
-    
     if view_option == "Standard Dashboard":
         st.divider()
 
-    # --- STANDARD DATA AGGREGATION ---
-    #agg_df = df.groupby(['Ad ID', 'Ad name', 'Clickable_Label', 'Facebook Video Link']).agg({
-    #    'Conversions': 'sum', 
-    #    'Visits': 'sum', 
-    #    'Unique visits': 'sum', 
-    #    'Normalized_Spend_USD': 'max', 
-    #    'CPA': lambda x: x[x > 0].mean() 
-    #}).reset_index().fillna(0) 
-
-    # --- STEP 1: Calculate temporary Revenue column ---
-    # This is Payout per Conv * Number of Convs
+    # --- AGGREGATION FOR CHARTS ---
+    # Calculate Total Payout for Weighted CPA
     df['Total_Payout'] = df['CPA'] * df['Conversions']
-
-    # --- STEP 2: Group and Aggregate ---
+    
     agg_df = df.groupby(['Ad ID', 'Ad name', 'Clickable_Label', 'Facebook Video Link']).agg({
         'Conversions': 'sum', 
         'Visits': 'sum', 
         'Unique visits': 'sum', 
-        'Normalized_Spend_USD': 'max', 
-        'Total_Payout': 'sum'  # Sum up all the revenue
+        'Normalized_Spend_USD': 'sum', 
+        'Total_Payout': 'sum'
     }).reset_index()
-
-    # --- STEP 3: Final Weighted CPA Calculation ---
-    # Weighted CPA = Total Payout / Total Conversions
+    
+    # Weighted CPA
     agg_df['CPA'] = agg_df['Total_Payout'] / agg_df['Conversions']
-
-    # Handle cases with 0 conversions to avoid "Infinity" or "NaN"
     agg_df['CPA'] = agg_df['CPA'].fillna(0).replace([np.inf, -np.inf], 0)
 
-
-    # --- FUNNEL & PERFORMANCE CHARTS ---
-
+    # --- FUNNEL ---
     if view_option in ["Standard Dashboard", "Focus: Funnel"]:
         col_a, col_b = st.columns(2) if view_option == "Standard Dashboard" else (st.container(), st.container())
-        
         with col_a:
             st.subheader("🔥 Integrated Conversion Funnel")
-            top_funnel = agg_df.nlargest(14, 'Conversions').sort_values('Conversions', ascending=True)
+            top_f = agg_df.nlargest(15, 'Conversions').sort_values('Conversions')
             fig_f = go.Figure()
-            fig_f.add_trace(go.Bar(y=top_funnel['Clickable_Label'], x=top_funnel['Visits'], name='Visits', orientation='h', marker_color='#636EFA'))
-            fig_f.add_trace(go.Bar(y=top_funnel['Clickable_Label'], x=top_funnel['Unique visits'], name='Unique Visits', orientation='h', marker_color='#00CC96'))
-            fig_f.add_trace(go.Bar(y=top_funnel['Clickable_Label'], x=top_funnel['Conversions'], name='Convs', orientation='h', marker_color='#EF553B'))
+            fig_f.add_trace(go.Bar(y=top_f['Clickable_Label'], x=top_f['Visits'], name='Visits', orientation='h', marker_color='#636EFA'))
+            fig_f.add_trace(go.Bar(y=top_f['Clickable_Label'], x=top_f['Unique visits'], name='Unique', orientation='h', marker_color='#00CC96'))
+            fig_f.add_trace(go.Bar(y=top_f['Clickable_Label'], x=top_f['Conversions'], name='Convs', orientation='h', marker_color='#EF553B'))
             h = 800 if "Focus" in view_option else CHART_HEIGHT
-            fig_f.update_layout(barmode='overlay', template="plotly_dark", height=h, margin=dict(l=20, r=20, t=30, b=20))
-            #st.plotly_chart(fig_f, use_container_width=True)
+            fig_f.update_layout(barmode='overlay', template="plotly_dark", height=h)
             st.plotly_chart(fig_f, width="stretch")
 
+    # --- SCATTER (Conversions vs CPA) ---
     if view_option in ["Standard Dashboard", "Focus: Performance Chart"]:
-        if view_option == "Standard Dashboard":
-            container = col_b
-        else:
-            container = st.container()
-        
+        container = col_b if view_option == "Standard Dashboard" else st.container()
         with container:
-            st.subheader("🏆 Conversions vs CPA")
-            top_perf = agg_df.nlargest(14, 'Conversions').sort_values('Conversions', ascending=True)
+            st.subheader("🏆 Efficiency: Conversions vs CPA")
+            top_p = agg_df.nlargest(15, 'Conversions').sort_values('Conversions')
             fig_p = go.Figure()
-            fig_p.add_trace(go.Bar(y=top_perf['Clickable_Label'], x=top_perf['Conversions'], name='Convs', orientation='h', marker_color='#00CC96'))
-            fig_p.add_trace(go.Scatter(y=top_perf['Clickable_Label'], x=top_perf['CPA'], name='CPA ($)', mode='markers+lines', marker=dict(size=10, color='#FFA15A'), xaxis='x2'))
+            fig_p.add_trace(go.Bar(y=top_p['Clickable_Label'], x=top_p['Conversions'], name='Convs', orientation='h', marker_color='#00CC96'))
+            fig_p.add_trace(go.Scatter(y=top_p['Clickable_Label'], x=top_p['CPA'], name='CPA ($)', mode='markers+lines', marker_color='#FFA15A', xaxis='x2'))
             h = 800 if "Focus" in view_option else CHART_HEIGHT
-            fig_p.update_layout(template="plotly_dark", height=h, xaxis=dict(title="Conversions"), xaxis2=dict(title="CPA ($)", overlaying='x', side='top', showgrid=False), margin=dict(l=20, r=20, t=50, b=20))
-            #st.plotly_chart(fig_p, use_container_width=True)
+            fig_p.update_layout(template="plotly_dark", height=h, xaxis=dict(title="Conversions"), xaxis2=dict(title="CPA ($)", overlaying='x', side='top'))
             st.plotly_chart(fig_p, width="stretch")
 
     if view_option == "Standard Dashboard":
         st.divider()
 
     # --- LEADERBOARD ---
-    st.header("📋 Master Creative Performance Leaderboard")
-    leaderboard = agg_df.sort_values('Conversions', ascending=False).head(int(row_count))
-    leaderboard.insert(0, 'Rank', range(1, len(leaderboard) + 1))
+    st.header("📋 Master Leaderboard")
+    # Apply row_count_lb
+    lb = agg_df.sort_values('Conversions', ascending=False).head(int(row_count_lb))
+    lb.insert(0, 'Rank', range(1, len(lb) + 1))
     
-    max_convs = int(agg_df['Conversions'].max()) if not agg_df.empty else 100
-    max_spend = int(agg_df['Normalized_Spend_USD'].max()) if not agg_df.empty else 100
+    max_c = int(agg_df['Conversions'].max()) if not agg_df.empty else 100
+    max_s = int(agg_df['Normalized_Spend_USD'].max()) if not agg_df.empty else 100
 
     st.dataframe(
-        leaderboard[['Rank', 'Ad ID', 'Ad name', 'Conversions', 'Normalized_Spend_USD', 'CPA', 'Facebook Video Link']],
+        lb[['Rank', 'Ad ID', 'Ad name', 'Conversions', 'Normalized_Spend_USD', 'CPA', 'Facebook Video Link']],
         column_config={
-            "Conversions": st.column_config.ProgressColumn("Convs", format="%d", min_value=0, max_value=max_convs, color="green"),
-            "Normalized_Spend_USD": st.column_config.ProgressColumn("Ad Spend ($)", format="$%.2f", min_value=0, max_value=max_spend, color="yellow"),
+            "Conversions": st.column_config.ProgressColumn("Convs", format="%d", min_value=0, max_value=max_c, color="green"),
+            "Normalized_Spend_USD": st.column_config.ProgressColumn("Spend ($)", format="$%.2f", min_value=0, max_value=max_s, color="yellow"),
             "CPA": st.column_config.NumberColumn("CPA ($)", format="$%.2f"),
-            "Facebook Video Link": st.column_config.LinkColumn("Watch", display_text="📺 View Ad")
+            "Facebook Video Link": st.column_config.LinkColumn("Ad", display_text="📺 View")
         },
-        hide_index=True, 
-        #use_container_width=True
+        hide_index=True,
         width="stretch"
     )
-    st.markdown(f"📊 **Showing {len(leaderboard)} of {len(agg_df)} ads** matching your filters.")
+    # Annotation
+    st.markdown(f"**Showing top {len(lb)} of {len(agg_df)} ads.**")
 
 if __name__ == "__main__":
     main()
