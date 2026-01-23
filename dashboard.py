@@ -14,7 +14,14 @@ st.set_page_config(
 )
 
 # --- Constants ---
-REPORT_FILE = "Final_Matched_FB_Voluum_Report.csv"
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
+FILE_NAME = "data/Final_Matched_FB_Voluum_Report.csv"
+LANG_FILE_NAME = "data/DIM_AD_LANGUAGE.csv"
+
+REPORT_FILE = os.path.join(script_dir, FILE_NAME)
+LANG_FILE = os.path.join(script_dir, LANG_FILE_NAME)
+
 NUMERIC_COLUMNS = ['Conversions', 'Normalized_Spend_USD', 'Visits', 'Unique visits', 'Unique Visit %', 'CPA', 'CV']
 CHART_HEIGHT = 600
 
@@ -23,8 +30,44 @@ def load_data():
     if not os.path.exists(REPORT_FILE):
         return None
     
-    # 1. Load Data (Force Ad ID to string to keep "1202..." intact)
-    df = pd.read_csv(REPORT_FILE, dtype={'Ad ID': str})
+    #df = pd.read_csv(REPORT_FILE, dtype={'Ad ID': str})
+
+    # Load Data
+    fact_df = pd.read_csv(REPORT_FILE, dtype={'Ad ID': str})
+    dim_df = pd.read_csv(LANG_FILE, dtype=str)
+    df = pd.merge(fact_df, dim_df, on='Ad ID', how='left')
+
+    # Scrub: Fill unknown language entries
+      # if Ad Name contains "spanish" or "español", set Language to "ES", else "EN"
+
+    # --- SCRUBBING LOGIC ---
+    if 'Language' in df.columns and 'Ad name' in df.columns:
+        # Fill actual empty values with a placeholder string first
+        df['Language'] = df['Language'].fillna('Unknown')
+        
+        # Identify which rows actually need scrubbing
+        mask_needs_scrub = (df['Language'] == 'Unknown') | (df['Language'] == 'nan')
+        
+        # Check Ad Name for keywords (case-insensitive)
+        # We look for "spanish" or "español" as requested
+        is_spanish = df['Ad name'].str.contains('spanish|español', case=False, na=False)
+        
+        # If it needs scrub AND is spanish keyword -> ES
+        df.loc[mask_needs_scrub & is_spanish, 'Language'] = 'ES'
+        
+        # If it needs scrub AND is NOT spanish keyword -> EN
+        df.loc[mask_needs_scrub & ~is_spanish, 'Language'] = 'EN'
+
+    # 2. Filter Garbage (Cleanup)
+    # Convert to string once for efficiency
+    df['Ad ID'] = df['Ad ID'].astype(str)
+    
+    # Filter out nulls, literal "nan" strings, and Facebook template placeholders like {{ad.id}}
+    df = df[
+        (df['Ad ID'] != 'nan') & 
+        (df['Ad ID'].notna()) & 
+        (~df['Ad ID'].str.contains('{', na=False))
+    ]
     
     # 2. Filter Garbage (Remove template tags or empty IDs)
     df = df.dropna(subset=['Ad ID'])
@@ -61,6 +104,7 @@ def load_data():
     # 6. String Safety (Prevent TypeError)
     df['Facebook Video Link'] = df['Facebook Video Link'].fillna("").astype(str)
     df['Ad name'] = df['Ad name'].fillna(df['Ad ID']).astype(str)
+    df['Language'] = df['Language'].fillna("Unknown").astype(str)
     
     # 7. Clickable Labels for Charts
     df['Clickable_Label'] = np.where(
@@ -101,7 +145,7 @@ def main():
     # --- 1. SIDEBAR ---
     st.sidebar.header("🕹️ Control Panel")
     
-    # 1. View Option
+    # View Option
     view_option = st.sidebar.radio(
         "🔎 View",
         options=["Standard Dashboard", "Focus: Trends", "Focus: Funnel", "Focus: Performance Chart"],
@@ -111,7 +155,7 @@ def main():
 
     st.sidebar.divider()
 
-    # 2. Date Selection (Separate Pickers)
+    # -- Date Selection (Separate Pickers) --
     st.sidebar.write("📅 **Select Date Range**")
     min_d, max_d = raw_df['Date'].min().date(), raw_df['Date'].max().date()
     default_s, default_e = date(2025, 1, 1), date(2025, 12, 31)
@@ -129,7 +173,8 @@ def main():
     # Filter Data by Date
     df = raw_df[(raw_df['Date'].dt.date >= start_date) & (raw_df['Date'].dt.date <= end_date)]
 
-    # 3. Master Leaderboard Rows (Before Search, max value based on Date filter only)
+
+    # -- Master Leaderboard Rows (Before Search, max value based on Date filter only) --
     total_ads_pre_search = df['Ad ID'].nunique()
     max_lb = max(1, total_ads_pre_search)
     default_lb = min(10, max_lb)
@@ -143,17 +188,38 @@ def main():
         help=f"Max available (pre-search): {max_lb}"
     )
 
-    # 4. Search Ad Name/ID
+    # -- Language--
+    lang_options = ["All"] + sorted(df['Language'].unique().tolist())
+    selected_lang = st.sidebar.selectbox("🌍 Select Language", options=lang_options, help="Filter dashboard by English (EN) or Spanish (ES)")
+
+    # -- Search Ad Name/ID --
+    # search_q = st.sidebar.text_input("🔍 Search Ad Name/ID:")
+    # if search_q:
+    #     df = df[df['Ad name'].str.contains(search_q, case=False) | df['Ad ID'].str.contains(search_q, case=False)]
+
+    # -- Search Ad Name/ID --
     search_q = st.sidebar.text_input("🔍 Search Ad Name/ID:")
+
+    # 3. Apply the logic: Search takes priority (Resets/Ignores Language)
     if search_q:
-        df = df[df['Ad name'].str.contains(search_q, case=False) | df['Ad ID'].str.contains(search_q, case=False)]
+        # We filter the master 'df' and ignore 'selected_lang'
+        df = df[
+            df['Ad name'].str.contains(search_q, case=False, na=False) | 
+            df['Ad ID'].str.contains(search_q, case=False, na=False)
+        ]
+        # Small UI hint to let the user know what happened
+        st.sidebar.caption("💡 *Searching across all languages*")
+        
+    elif selected_lang != "All":
+        # If NO search, apply the language filter
+        df = df[df['Language'] == selected_lang]
 
     # if no results after search
     if df.empty:
         st.warning(f"⚠️ No results found for '{search_q}'. Try a different search.")
         st.stop()  # This stops the script here so the rest doesn't crash!
 
-    # 5. Monthly/Daily Breakdown Rows (After Search, max value based on filtered result)
+    # -- Monthly/Daily Breakdown Rows -- (After Search, max value based on filtered result)
     total_ads_post_search = df['Ad ID'].nunique()
     max_td = max(1, total_ads_post_search)
     default_td = min(20, max_td)
@@ -167,7 +233,7 @@ def main():
         help=f"Max available: {max_td}"
     )
 
-    # --- 3. MAIN DASHBOARD ---
+    # --- 2. MAIN DASHBOARD ---
     st.title("🚀 2025 FB Ads Performance")
     
     # KPI Metrics
@@ -176,7 +242,8 @@ def main():
 
     # --- AGGREGATION (Calculate Early for Leaderboard) ---
     df['Total_Payout'] = df['CPA'] * df['Conversions']
-    agg_df = df.groupby(['Ad ID', 'Ad name', 'Clickable_Label', 'Facebook Video Link']).agg({
+    agg_df = df.groupby(['Ad ID', 'Ad name', 'Language', 'Clickable_Label', 'Facebook Video Link']).agg({
+    #agg_df = df.groupby(['Ad ID', 'Ad name', 'Clickable_Label', 'Facebook Video Link']).agg({
         'Conversions': 'sum', 
         'Visits': 'sum', 
         'Unique visits': 'sum', 
@@ -241,9 +308,12 @@ def main():
 
     # 4. Display Table with Max-Height Logic
     st.dataframe(
-        lb_page[['Rank', 'Ad ID', 'Ad name', 'Conversions', 'Normalized_Spend_USD', 'CPA', 'Facebook Video Link']],
+        lb_page[['Rank', 'Ad ID', 'Ad name', 'Language', 'Conversions', 'Normalized_Spend_USD', 'CPA', 'Facebook Video Link']],
+        #lb_page[['Rank', 'Ad ID', 'Ad name', 'Conversions', 'Normalized_Spend_USD', 'CPA', 'Facebook Video Link']],
         column_config={
-            "Rank": st.column_config.NumberColumn("Rank"),
+            "Rank": st.column_config.NumberColumn("Rank", width=5),
+            "Language": st.column_config.TextColumn("Lang", width=10, help="EN = English, ES = Spanish"),
+            "Ad ID": st.column_config.TextColumn("Ad ID", width="small"),
             "Conversions": st.column_config.ProgressColumn("Convs", format="%d", min_value=0, max_value=max_c, color="green"),
             "Normalized_Spend_USD": st.column_config.ProgressColumn("Spend ($)", format="$%.2f", min_value=0, max_value=max_s, color="yellow"),
             "CPA": st.column_config.NumberColumn("CPA ($)", format="$%.2f"),
@@ -261,7 +331,6 @@ def main():
 
     with foot_col1:
         # "Back to Page 1" Button
-        # It only shows as clickable if the user is NOT already on page 1
         if st.button("⏪ First Page", disabled=(st.session_state.lb_page_selector == 1)):
             st.session_state.lb_page_selector = 1
             st.rerun()
