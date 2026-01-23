@@ -148,6 +148,11 @@ def main():
     if search_q:
         df = df[df['Ad name'].str.contains(search_q, case=False) | df['Ad ID'].str.contains(search_q, case=False)]
 
+    # if no results after search
+    if df.empty:
+        st.warning(f"⚠️ No results found for '{search_q}'. Try a different search.")
+        st.stop()  # This stops the script here so the rest doesn't crash!
+
     # 5. Monthly/Daily Breakdown Rows (After Search, max value based on filtered result)
     total_ads_post_search = df['Ad ID'].nunique()
     max_td = max(1, total_ads_post_search)
@@ -373,7 +378,8 @@ def main():
         )
         
         fig.update_layout(hovermode="x unified")
-        st.plotly_chart(fig, use_container_width=True)
+        #st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
 
     # --- BREAKDOWN TABLES ---
