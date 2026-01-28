@@ -8,7 +8,7 @@ from datetime import datetime, date
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="🚀 2025 FB Ads Performance",
+    page_title="📊 FB & FBES KPIs",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -16,11 +16,12 @@ st.set_page_config(
 # --- Constants ---
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-FILE_NAME = "data/Final_Matched_FB_Voluum_Report.csv"
-LANG_FILE_NAME = "data/DIM_AD_LANGUAGE.csv"
+DATA_FOLDER = 'data/'
+FILE_NAME = "Final_Matched_FB_Voluum_Report.csv"
+LANG_FILE_NAME = "DIM_AD_LANGUAGE.csv"
 
-REPORT_FILE = os.path.join(script_dir, FILE_NAME)
-LANG_FILE = os.path.join(script_dir, LANG_FILE_NAME)
+REPORT_FILE = os.path.join(script_dir, DATA_FOLDER, FILE_NAME)
+LANG_FILE = os.path.join(script_dir, DATA_FOLDER, LANG_FILE_NAME)
 
 NUMERIC_COLUMNS = ['Conversions', 'Normalized_Spend_USD', 'Visits', 'Unique visits', 'Unique Visit %', 'CPA', 'CV']
 CHART_HEIGHT = 600
@@ -40,7 +41,7 @@ def load_data():
     # Scrub: Fill unknown language entries
       # if Ad Name contains "spanish" or "español", set Language to "ES", else "EN"
 
-    # --- SCRUBBING LOGIC ---
+    # --- Language SCRUBBING LOGIC ---
     if 'Language' in df.columns and 'Ad name' in df.columns:
         # Fill actual empty values with a placeholder string first
         df['Language'] = df['Language'].fillna('Unknown')
@@ -128,11 +129,17 @@ def display_kpi_metrics(df):
     u_pct = (t_u_visits / t_visits * 100) if t_visits > 0 else 0
     
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total Spend", f"${t_spend:,.0f}", help="Sum of daily spend")
-    c2.metric("Conversions", f"{t_convs:,.0f}")
+    c1.metric("Total Spend", f"${t_spend/1000:,.2f} k", help="Sum of daily spend")
+    c2.metric("Conversions", f"{t_convs/1000:,.0f} k")
     c3.metric("Weighted Avg CPA", f"${avg_cpa:.2f}")
     c4.metric("Unique Visits", f"{t_u_visits:,.0f}")
     c5.metric("Unique %", f"{u_pct:.1f}%")
+
+    # --- New Shorthand Display ---
+    with c1:
+        st.caption(f"({t_spend:,.2f})")
+    with c2:
+        st.caption(f"({t_convs:,.0f})")
 
 
 
@@ -148,9 +155,9 @@ def main():
     # View Option
     view_option = st.sidebar.radio(
         "🔎 View",
-        options=["Standard Dashboard", "Focus: Trends", "Focus: Funnel", "Focus: Performance Chart"],
+        options=["Standard", "Focus: Trends", "Focus: Funnel", "Focus: Performance Chart"],
         index=0,
-        help="Note: The Master Leaderboard is always visible at the top. Scroll down to see your selected 'Focus' view."
+        help="Note: The Ad Leaderboard is always visible at the top. Scroll down to see your selected 'Focus' view."
     )
 
     st.sidebar.divider()
@@ -180,7 +187,7 @@ def main():
     default_lb = min(10, max_lb)
     
     row_count_lb = st.sidebar.number_input(
-        "🔢 Master Leaderboard Rows:", 
+        "🔢 Ad Board Rows:", 
         min_value=1,
         step=5, 
         max_value=max_lb, 
@@ -234,7 +241,7 @@ def main():
     )
 
     # --- 2. MAIN DASHBOARD ---
-    st.title("🚀 2025 FB Ads Performance")
+    st.title("FB & FBES KPIs")
     
     # KPI Metrics
     display_kpi_metrics(df)
@@ -278,7 +285,7 @@ def main():
 
 
     # --- MASTER LEADERBOARD (Pagination Logic) ---
-    st.header("📋 Master Leaderboard", help=f"Ranking based on Conversion count")
+    st.header("📋 Ad Board", help=f"Ranking based on Conversion count")
 
     # 1. Setup Pagination Variables
     rows_per_page = int(row_count_lb) 
@@ -288,6 +295,8 @@ def main():
     # 2. Prepare Data (Sorted & Ranked)
     full_lb = agg_df.sort_values('Conversions', ascending=False).copy()
     full_lb.insert(0, 'Rank', range(1, len(full_lb) + 1))
+    # divide spend by 1000 
+    full_lb['Normalized_Spend_USD'] = full_lb['Normalized_Spend_USD'] / 1000
     
     # Check if page is initialized in session state to prevent reset on interaction
     if "lb_page_selector" not in st.session_state:
@@ -308,16 +317,17 @@ def main():
 
     # 4. Display Table with Max-Height Logic
     st.dataframe(
-        lb_page[['Rank', 'Ad ID', 'Ad name', 'Language', 'Conversions', 'Normalized_Spend_USD', 'CPA', 'Facebook Video Link']],
+        lb_page[['Rank', 'Ad ID', 'Ad name', 'Language', 'Facebook Video Link', 'Conversions', 'Normalized_Spend_USD', 'CPA']],
         #lb_page[['Rank', 'Ad ID', 'Ad name', 'Conversions', 'Normalized_Spend_USD', 'CPA', 'Facebook Video Link']],
         column_config={
             "Rank": st.column_config.NumberColumn("Rank", width=5),
             "Language": st.column_config.TextColumn("Lang", width=10, help="EN = English, ES = Spanish"),
             "Ad ID": st.column_config.TextColumn("Ad ID", width="small"),
-            "Conversions": st.column_config.ProgressColumn("Convs", format="%d", min_value=0, max_value=max_c, color="green"),
-            "Normalized_Spend_USD": st.column_config.ProgressColumn("Spend ($)", format="$%.2f", min_value=0, max_value=max_s, color="yellow"),
-            "CPA": st.column_config.NumberColumn("CPA ($)", format="$%.2f"),
-            "Facebook Video Link": st.column_config.LinkColumn("Ad", display_text="📺 View")
+            "Ad name": st.column_config.TextColumn("Ad Name", width="small"),
+            "Conversions": st.column_config.ProgressColumn("Convs", format="%d", min_value=0, max_value=max_c, width='small', color="green"),
+            "Normalized_Spend_USD": st.column_config.ProgressColumn("Spend ($)", format="$ %.2f k", min_value=0, max_value=max_s/1000, width='small', color="yellow"),
+            "CPA": st.column_config.NumberColumn("CPA ($)", format="$%.2f", width=10),
+            "Facebook Video Link": st.column_config.LinkColumn("Link", width=25, display_text="📺 View")
         },
         hide_index=True,
         width="stretch",
@@ -345,11 +355,11 @@ def main():
         st.markdown(f"**Page {st.session_state.lb_page_selector} of {num_pages}**. (Ads {start_idx + 1} to {min(end_idx, total_rows)} - of {total_rows})")
 
 
-    if view_option == "Standard Dashboard":
+    if view_option == "Standard":
         st.divider()
 
     # --- TRENDS ---
-    # if view_option in ["Standard Dashboard", "Focus: Trends"]:
+    # if view_option in ["Standard", "Focus: Trends"]:
     #     st.subheader("📈 Conversion Trend")
     #     top_ids = df.groupby('Ad ID')['Conversions'].sum().nlargest(15).index
     #     trend_df = df[df['Ad ID'].isin(top_ids)].groupby(['Date', 'Ad name'])['Conversions'].sum().reset_index()
@@ -360,7 +370,7 @@ def main():
 
 
     # --- TRENDS ---
-    if view_option in ["Standard Dashboard", "Focus: Trends"]:
+    if view_option in ["Standard", "Focus: Trends"]:
         st.subheader("📈 Trend Analysis")
         
         # 1. TUNE CONTROLS
@@ -447,12 +457,11 @@ def main():
         )
         
         fig.update_layout(hovermode="x unified")
-        #st.plotly_chart(fig, use_container_width=True)
         st.plotly_chart(fig, width='stretch')
 
 
     # --- BREAKDOWN TABLES ---
-    if view_option in ["Standard Dashboard", "Focus: Trends"]:
+    if view_option in ["Standard", "Focus: Trends"]:
         tab_mo, tab_da = st.tabs(["📅 Monthly Breakdown", "🗓️ Daily Breakdown"])
         
         total_ads_in_view = df['Ad ID'].nunique()
@@ -497,14 +506,14 @@ def main():
                 )
                 st.markdown(f"**Showing top {len(p_da)} of {total_ads_in_view} ads.**")
 
-    if view_option == "Standard Dashboard":
+    if view_option == "Standard":
         st.divider()
 
     # --- FUNNEL ---
-    if view_option in ["Standard Dashboard", "Focus: Funnel"]:
-        col_a, col_b = st.columns(2) if view_option == "Standard Dashboard" else (st.container(), st.container())
+    if view_option in ["Standard", "Focus: Funnel"]:
+        col_a, col_b = st.columns(2) if view_option == "Standard" else (st.container(), st.container())
         with col_a:
-            st.subheader("🔥 Integrated Conversion Funnel")
+            st.subheader("⏚ Conversion Funnel")
             top_f = agg_df.nlargest(15, 'Conversions').sort_values('Conversions')
             fig_f = go.Figure()
             fig_f.add_trace(go.Bar(y=top_f['Clickable_Label'], x=top_f['Visits'], name='Visits', orientation='h', marker_color='#636EFA'))
@@ -515,10 +524,10 @@ def main():
             st.plotly_chart(fig_f, width="stretch")
 
     # --- SCATTER (Conversions vs CPA) ---
-    if view_option in ["Standard Dashboard", "Focus: Performance Chart"]:
-        container = col_b if view_option == "Standard Dashboard" else st.container()
+    if view_option in ["Standard", "Focus: Performance Chart"]:
+        container = col_b if view_option == "Standard" else st.container()
         with container:
-            st.subheader("🏆 Efficiency: Conversions vs CPA")
+            st.subheader("⧎ Efficiency: Conv vs CPA")
             top_p = agg_df.nlargest(15, 'Conversions').sort_values('Conversions')
             fig_p = go.Figure()
             fig_p.add_trace(go.Bar(y=top_p['Clickable_Label'], x=top_p['Conversions'], name='Convs', orientation='h', marker_color='#00CC96'))
